@@ -1,0 +1,729 @@
+#!/usr/bin/perl -w
+package GitCvs;
+use strict;
+use warnings;
+use Carp qw(croak);
+use File::Spec;
+use File::Path qw(mkpath);
+
+# FIXME need to allow first checkout to use an author map that isn't in .git/
+
+my $SYMREF_FOR_LAST_EXPORT = 'git-cvs/CVSEXPORTCOMMITTED';
+
+# The base component for cvs working branches
+my $CVS_WORKING_BRANCH_BASE = 'cvsworking';
+
+# the dir under .git/git-cvs in which to make CVS checkouts
+my $CVS_CHECKOUT_DIR = 'cvscheckout'; 
+
+# what ref name we use to track the CVS HEAD branch
+my $CVS_HEAD_TRACKING_REF = 'cvshead';
+
+# the name under 'refs' to keep these CVS tracking refs
+my $REMOTE_FOR_CVS = 'cvs';
+
+# the name of a git repository dir
+my $GIT_DIR = '.git';
+
+my @ATTRS = 
+    qw(branch format cvsroot cvsmodule gitworking
+       gitdir config dryrun patch no_autocommit);
+
+## generate our accessors
+for my $attr (@ATTRS) {
+    my $slot = "GitCvs::$attr";
+    no strict 'refs';
+    *{$slot} = sub {
+        my $self = shift;
+        @_? ($self->{$slot} = shift) : $self->{$slot};
+    };
+}
+
+
+sub new {
+    my $class = shift;
+    my %args = @_;
+
+
+    croak "You must define the 'cvsroot' attribute"
+        unless $args{cvsroot};
+
+    my $gitworking = File::Spec->rel2abs($args{gitworking} || '.');
+    my $gitdir = $args{gitdir}?
+        File::Spec->rel2abs($args{gitdir}) :
+        File::Spec->catdir($gitworking, $GIT_DIR);
+
+    my $self = bless {
+        'GitCvs::cvsmodule'      => $args{cvsmodule},
+        'GitCvs::cvsref'         => $args{cvsref},
+        'GitCvs::gitworking'     => $gitworking,
+        'GitCvs::format'         => $args{format} || 'oneline',
+#        'GitCvs::remote_for_cvs' => 'cvs',        
+        'GitCvs::gitdir'           => $gitdir,
+        'GitCvs::cvsroot'        => $args{cvsroot},
+        'GitCvs::patch'          => $args{patch},
+        'GitCvs::dryrun'         => !!$args{dryrun},
+        'GitCvs::no_autocommit'  => !!$args{no_autocommit},
+    }, $class;
+
+    # FIXME validate cvsroot, cvsmodule, gitworking
+
+    # Now, having set ->gitworking, we can use methods which invoke
+    # git, or otherwise depend on this value.
+
+    # Note, we defer making the logdir until we start needing to write to it, 
+    # since we don't want to create .git just yet (else it confuses git commands
+    # which use its existance as indicating a git repo).
+
+    return $self;    
+}
+
+# Returns an appropriate --git-dir argment to set it to $obj->gitdir.
+sub _gitdir_arg { "--git-dir '".shift->gitdir."'" }
+
+# Returns a path to a unique, unused log-file path
+# in.git/git-cvs/logs, creating intermediate directories where
+# necessary.
+sub _unique_logfile {
+    my $self = shift;
+
+    my ($s,$m,$h,$D,$M,$Y) = localtime;
+    my $date = sprintf('%04d-%02d-%02d-%02d%02d-%02d', 
+                       $Y+1900,$M+1,$D,$h,$m,$s); 
+
+    my $gitworking = $self->gitworking;
+    my $gitdir = $self->gitdir;
+
+    # Be careful not to create .git if it isn't there - if we do that
+    # we can trick git-cvsimport into thinking there's a repository
+    # when there isn't, and the initial import will fail.  In this
+    # case, we use $gitworking instead.  It means the first export log
+    # will not be in the usual place, but that's probably ok - besides
+    # users may want to see it explicitly.
+    my $logdir = -d $gitdir?
+        File::Spec->catdir($gitdir, qw(git-cvs logs)) :
+        $gitworking;                                    
+
+    mkpath $logdir;
+    
+    # belt *and* braces: use dates and a unique index if necessary to
+    # name the file
+    my $index = '';
+    my $logfile;
+    $index-- 
+        while -e ($logfile = File::Spec->catdir($logdir, 
+                                                "$date$index.cvs-pull.log"));
+
+    return $logfile;
+}
+
+
+# Returns the current branch checked out in the git working directory
+sub current_branch {
+    my $self = shift;
+    my $gitworking = $self->gitworking;
+    my $gda = $self->_gitdir_arg;
+
+    my ($current_branch) = grep s/^[*]\s*//, 
+        `git $gda --work-tree '$gitworking' branch`;
+    die "failed to get current git working branch in use\n"
+        if $?;
+    chomp $current_branch if defined $current_branch;
+    return $current_branch;
+}
+
+
+# Returns a list of the branch heads in the git working directory
+sub list_branches {
+    my $self = shift;
+    my $gda = $self->_gitdir_arg;
+
+    my @branches = map /^[*]?\s*(.*)/, 
+        `git $gda branch`;
+    die "failed to list branches\n"
+        if $?;
+    return @branches;
+}
+
+
+# checks out a CVS branch $tag from the designated repository and
+# module into the directory $dir (which should exist)
+sub cvs_checkout {
+    my $self = shift;
+    my $cvstag = shift;
+    my $dir = shift;
+
+    croak "No such dir '$dir'"
+        unless -d $dir;
+    
+    my $cvsroot        = $self->cvsroot;
+    my $cvsmodule      = $self->cvsmodule;
+
+    # Checking back into a working copy created explicitly with -r
+    # HEAD seems to cause cvs/cvsimport to fail.  Doing it this way
+    # seems to work.
+    my $tagopt = $cvstag eq 'HEAD'?
+        "" : "-r '$cvstag'";
+ 
+    my $command = <<COMMAND;
+cvs -q -d '$cvsroot' co $tagopt -d '$dir' '$cvsmodule' >/dev/null
+COMMAND
+    warn ">>>$command";
+    system $command;
+    die "command failed ($command)" if $?
+}
+
+
+# define the pull and push operations in the context of the variables
+# defined already
+sub cvs_pull {
+    my $self = shift;
+    my %params = @_;
+
+    
+    my $gda            = $self->_gitdir_arg;
+    my $gitworking     = $self->gitworking;
+    my $cvsroot        = $self->cvsroot;
+    my $cvsmodule      = $self->cvsmodule;
+
+    mkpath $gitworking;
+
+    # Find a unique filename for the log, so we don't clobber old logs
+    # when we re-run.
+    my $logfile = $self->_unique_logfile();
+
+    my @options = qw(-a -p x -v -k);
+    
+
+    if ($params{author_file}) {
+        croak "No such file $params{author_file}"
+            unless -f $params{author_file};
+
+        push @options,'-A', $params{author_file};
+    }
+    
+    push(@options, 
+         '-r', "'$REMOTE_FOR_CVS'",
+         '-o', "'$CVS_HEAD_TRACKING_REF'", 
+         '-d', "'$cvsroot'", 
+         '-C', "'$gitworking'");
+
+    print my $command = <<COMMAND;
+git $gda cvsimport @options '$cvsmodule'  > '$logfile'
+COMMAND
+
+
+    system $command 
+        and die "command failed ($command): $?"
+            unless $self->dryrun;    
+
+    # Now find the CVS branches that exist
+    $command = <<COMMAND;
+git $gda show-ref
+COMMAND
+
+    # Get the CVS tags from the refs that were created - but
+    # exclude 'HEAD' and $CVS_HEAD_TRACKING_REF
+    my @cvs_tags = 
+        grep $_ ne $CVS_HEAD_TRACKING_REF && $_ ne 'HEAD', 
+        map m!^.* refs/remotes/$REMOTE_FOR_CVS/(.*)!, `$command`;
+    
+    my %tracker_branches = map {
+        +"$CVS_WORKING_BRANCH_BASE/$_" => "remotes/$REMOTE_FOR_CVS/$_";
+    } @cvs_tags;
+
+    # exclude those which exist already
+    delete $tracker_branches{$_} 
+        foreach $self->list_branches;
+    
+    # and create those left
+    while(my ($tracker, $remote) = each %tracker_branches) {
+        $command = <<COMMAND;
+git $gda branch '$tracker' '$remote' >/dev/null
+COMMAND
+        system $command;
+        warn "Failed to create branch $tracker ($command)\n"
+            if $?;
+    }
+}
+
+
+# $obj->cvs_push(cvs_checkout_dir => $cvs_checkout_dir, branch => $branch, from => $from, commits => \@commits)
+#
+# Push changes from a git branch into CVS.
+#
+# The branch to use is $branch, which can be any branch, but requires
+# a git tree-ish reference supplied as $from to specify where to
+# commit from.
+#
+# Unless, $branch is a cvs tracking branch, i.e. one of the branches
+# named $CVS_WORKING_BRANCH_BASE/XXX created by cvs_pull, where XXX is
+# some CVS tag, in which case $from is inferred to be refs/cvs/XXX.
+# 
+# If $branch is not specified either, then the current git branch is
+# used. If there is no current branch, an error will be thrown.
+#
+# $cvs_checkout_dir should be a checked-out CVS working directory which can be
+# used by git-cvsexportcommit to apply and commit the patches.
+#
+# Or, if omitted, and the (posibly inferred) value of $branch is a cvs
+# tracking branch, then $cvs_checkout_dir is also inferred to be a CVS
+# working directory checked out under
+# $gitworking/.git/git-cvs/$CVS_CHECKOUT_DIR.  This will be created
+# and checked out first if necessary.
+# 
+# Finally, if @commits are specified, $branch and $from are ignored
+# (except for deducing $cvs_checkout_dir if that is not given), and the
+# specific commits given are commiteed, in order.
+sub cvs_push {
+    my $self = shift;
+    my %params = @_;
+
+    my $gitdir         = $self->gitdir;
+    my $gda            = $self->_gitdir_arg;
+    my $gitworking     = $self->gitworking;
+    my $format         = $self->format;
+
+    croak "no git repository at $gitdir"
+        unless -d $gitdir;
+
+    # Find a unique filename for the log, so we don't clobber old logs
+    # when we re-run
+    my $logfile = $self->_unique_logfile();
+
+
+    my ($branch, $from, $cvs_checkout_dir, $commits) = 
+        @params{'branch', 'from', 'cvs_checkout_dir', 'commits'};
+
+    # deduce $branch if none given
+    unless (defined $branch) {
+        $branch = $self->current_branch;
+        croak("You are not on any git branch, so either you need to be, ",
+              "or you need to define the 'branch' parameter")
+            unless $branch;
+    }           
+    
+
+    # get the cvstag if the branch implies this
+    my $cvstag = _branch_to_cvstag($branch);
+
+    # check or deduce the $cvs_checkout_dir
+    if (defined $cvs_checkout_dir) {
+        croak "no valid cvs checkout dir '$cvs_checkout_dir'\n" 
+            unless -d $cvs_checkout_dir && -d "$cvs_checkout_dir/CVS";
+
+    } else {
+        croak("You are not on a cvs working branch, so either you ",
+              "need to be, or you need to define the 'cvs_checkout_dir' ",
+              "parameter")
+            unless defined $cvstag;
+
+        $cvs_checkout_dir = File::Spec->catdir($gitdir, 'git-cvs', 
+                                               $CVS_CHECKOUT_DIR, $cvstag);
+
+        # make the checkout dir and check it out, if necc.
+        mkpath $cvs_checkout_dir;
+        $self->cvs_checkout($cvstag => $cvs_checkout_dir)
+            unless -d File::Spec->catdir($cvs_checkout_dir, 'CVS');
+    }
+
+    # get or deduce the commits
+    if (defined $commits) {
+        # Get a list of commit ids as specified by this arg.
+
+        croak "commits parameter must be an array ref"
+            unless ref $commits eq 'ARRAY';
+
+        # detaint commits
+        my @invalids = grep !($_ = valid_commit($_)), @$commits;
+
+        croak "these commits are invalid: @invalids"
+            if @invalids;
+
+    } else {
+        # deduce $from if none given
+        unless (defined $from) {
+            croak("We are not on a cvs working branch, so we either ",
+                  "need to be, or you need to define the 'from' parameter")
+                unless defined $cvstag;
+            
+            $from = "remotes/$REMOTE_FOR_CVS/$cvstag";
+        }
+        
+        # generate the commits
+        $commits = $self->_generate_commits($from => $branch);
+    }
+
+    # Finally now we have a list of $commits, and $cvs_checkout_dir, we can get to work.
+
+    # Print out the commits we're using
+    # FIXME git-log prints in date order.
+    # This can mean that commits are listed in the wrong order, but
+    # they are still applied in the correct order.  It is confusing
+    # when this happens, however.
+    print "Pending commits:\n";
+    system "git $gda --no-pager log --no-walk '--pretty=$format' @$commits";
+    print "\n";
+
+
+    my @options = qw(-p -v -u);
+
+    # If we don't autocommit, we may need to force merges to updated
+    # files
+    push @options, 
+        $self->no_autocommit? '-f' : '-c';  
+
+    # Export each commit
+    my $parent_commit = ''; # we need this in case we commit a merge
+    foreach my $commit (@$commits) {
+
+        # After committing, update the symref tracking the last commit
+        print my $command = <<COMMAND;
+git $gda cvsexportcommit @options -w '$cvs_checkout_dir' $parent_commit $commit;
+COMMAND
+# git $gda symbolic-ref '$SYMREF_FOR_LAST_EXPORT' $commit; # shelved
+
+        $parent_commit = $commit;
+
+        system $command 
+            and die "failed: $?\n"
+                unless $self->dryrun;
+    }
+}
+
+
+sub _branch_to_cvstag {
+    my $branch = shift;
+    return "HEAD" 
+        if $branch eq 'master'; # master also tracks head, by default
+
+    my ($cvstag) = ($branch =~ m!^$CVS_WORKING_BRANCH_BASE/(.*)!);
+    return $cvstag;
+}
+sub _cvstag_to_branch {
+    my $cvstag = shift;
+    return 'master' if $cvstag eq "HEAD";
+
+    return "cvsworking/$cvstag";
+}
+
+# $commits = $obj->_generate_commits
+# Given a branch and an upstream commit,
+# returns an arrayref of commits between the two.
+sub _generate_commits {
+    my $self = shift;
+    my $from = shift;
+    my $branch = shift;
+
+    my $gda = $self->_gitdir_arg;
+#    my $remote_for_cvs = $self->remote_for_cvs;
+
+    # Generate a list of commits using git
+
+# Old way
+#        @commits = reverse { s/[+ ]+//; $_ } 
+#           `git --no-pager --git-dir='$gitworking/.git' cherry '$REMOTE_FOR_CVS/$from'`; 
+
+# Shelved the use of $SYMREF_FOR_LAST_EXPORT, doesn't quite work
+#        # find the last upstream commit
+#        my $upstream_commit = 
+#            `git --git-dir='$gitworking/.git' symbolic-ref '$SYMREF_FOR_LAST_EXPORT' 2>/dev/null`;
+#        $upstream_commit = $branch
+#            unless $upstream_commit;
+
+# This doesn't quite work yet - if we do a 
+# git-reset --hard cvs/cvshead then the symbol-ref is rendered wrong
+#        @commits = 
+#           `git --no-pager --git-dir='$gitworking/.git' rev-list --reverse master...$upstream_commit`;
+
+    my $command = <<COMMAND;
+git --no-pager $gda rev-list --reverse '$from'...'$branch'
+COMMAND
+    ;
+    
+    my @commits = `$command`;
+    die "command failed ($command)"
+        if $?;
+    chomp @commits;
+
+    return \@commits;
+}
+
+######################################################################
+package main;
+use strict;
+use warnings;
+#use File::Path qw(mkpath);
+use Getopt::Long;
+use File::Spec;
+
+my $DEFAULT_CONFIG_FILENAME = '.git-cvs';
+
+
+# Note for later:
+# After push, perhaps this script could do:
+#   git-rebase HEAD^ cvs/cvshead
+# or:
+#   git-reset --hard cvs/cvshead # seems to work better for me.
+#
+# Perhaps this script could tag last export when committing to cvs,
+# since that prevents accidental re-commits
+
+# Notes for tracking multiple CVS branches.
+# On cvsimport, the branches are imported as remotes/cvs/* 
+# After this, any new branches should have local tracker branches made, 
+# in heads/$CVS_WORKING_BRANCH_BASE/*
+# On exportcommit, if no explicit --cvsworking param is given,
+# and if not yet created, a cvs working dir for the appropriate
+# branch should be checked out into .git/git-cvs/working/*
+# Then, cvsexportcommit invoked using this working copy (I think 
+# cvsexportcommit will update as necessary).
+# Finally, the user needs to do git-cvs pull, and a 
+# git reset --hard cvs/<trackerbranch>
+# (perhaps the script could do this automatically later).
+
+my $usage = <<USAGE;
+
+Usage:
+
+  $0 pull --cvsroot <CVS ROOT> [OPTIONS]
+  $0 push --cvsworking <CVS WORKING> [OPTIONS]
+
+Push or pull changes from a cvs repository to a git repository into a
+remote branch called $CVS_WORKING_BRANCH_BASE/$CVS_HEAD_TRACKING_REF.
+
+This command is a wrapper around git-cvsimport and
+git-cvsexportcommit, which tries to make them more convenient to use.
+
+When pulling, if --branch, --cvsref and --commits are not supplied,
+git-cvs attempts to infer the CVS branch from current branch (which
+must be 'master' for CVS HEAD, and $CVS_WORKING_BRANCH_BASE/XXX for
+any other CVS tag 'XXX').  
+
+When pushing, if --cvsworking is not supplied, it will use one in
+$GIT_DIR/git-cvs/$CVS_CHECKOUT_DIR/XXX, which will be checked out for
+you if not created.
+
+Currently, there no way to create a branch in git and have that pushed
+back into CVS - creating a branch called $CVS_WORKING_BRANCH_BASE/blah
+will not create a CVS branch of the same name. Branches have to be
+created in CVS and pulled back into git.
+
+This command will look for a config file in the current directory
+called $DEFAULT_CONFIG_FILENAME, which can define default option values, one per line
+in the format:
+
+  option=value
+
+e.g.
+
+  cvsroot=:ext:user\@server.com:/path/to/CVS
+  cvsmodule=some-module
+  cvsworking=/home/user/cvsworking/some-module
+
+This can be put in the Git working directory, and should allow the
+command to be invoked there simply as 'git-cvs push' or 'git-cvs pull'.
+
+Note, before using this command to commit your changes, you may wish
+to create a $GIT_DIR/cvs-authors file, mapping local users to those in the
+CVS repository:
+
+ localuser=Some User <user\@server.com>
+
+See git-cvsexportcommit for details of this.
+
+Common options:
+
+  --gitworking <GIT DIR>   - the path to your git working directory (i.e
+                             where $GIT_DIR is)
+
+  --dry-run                - don't do anything, just print the commands 
+                             which would be executed.
+
+  --config <CONFIG FILE>   - load default options from <CONFIG FILE> 
+                             instead of $DEFAULT_CONFIG_FILENAME
+
+
+Options for pull:
+
+  --cvsroot <CVS ROOT>     - pull from this CVS repository, 
+                             e.g. :ext:user\@somewhere.com:/path/to/CVS
+
+  --cvsmodule <CVS MODULE> - pull this module (default is all modules)
+
+  --author-file <file>     - Pass this file to cvsimport via the -A option.
+                             See cvsimport's man page for details.
+                             If the names in the repository need to be mapped, 
+                             you will need to use this on first import.
+
+Options for push:
+
+  --cvsworking <CVS WORKING>  - apply patches to this CVS working copy 
+
+  --no-autocommit          - Don't autocommit (i.e. supply -f option to
+                             git-cvsexportcommit, instead of -c).
+                             With this patches are all applied to the
+                             CVS directory, but not committed and all
+                             git log messages will be lost, however
+                             you will be able to examine the changes
+                             before comitting.
+
+  --commits <FILENAME>     - Push only the commits listed in FILENAME  
+                             (which can be - to read from standard input)
+
+  --cvsref                 - The local CVS-tracking ref we are committing 
+                             relative to (defaults to $CVS_HEAD_TRACKING_REF).
+  --branch                 - The branch to find patches in (defaults to 
+                             the current branch, or master)
+USAGE
+
+# set this environment variable so ssh is used, if it is not already set
+$ENV{CVS_RSH} ||= 'ssh';
+
+my (%config, $author_file, $config_file, $cvs_checkout_dir, $cvsref, $branch, $commits);
+
+GetOptions("dry-run"       => \$config{dryrun},
+           "author-file=s" => \$author_file,
+           "pretty=s"      => \$config{format},
+           "branch=s"      => \$branch,
+           "cvsroot=s"     => \$config{cvsroot},
+           "cvsmodule=s"   => \$config{cvsmodule},
+           "cvsworking=s"  => \$cvs_checkout_dir,
+           "cvsref=s"      => \$cvsref,
+           "gitworking=s"  => \$config{gitworking},
+           "no-autocommit" => \$config{no_autocommit},
+           "commits=s"     => \$commits,
+           "config=s"      => \$config_file) 
+    or die "Failed to read parameters: $@";
+
+my $operation = shift @ARGV;
+
+die "Too many parameters\n$usage" 
+    if @ARGV;
+die "Please supply an operation\n$usage" 
+    unless $operation;
+
+# locate the config file
+my $default_config_path = 
+    File::Spec->catdir($config{gitworking} || '.', $DEFAULT_CONFIG_FILENAME);
+
+$config_file ||= $default_config_path
+    if -f $default_config_path;
+
+# Use it to set option values in the main package which
+# are not already set
+set_values(\%config, $config_file)
+    if $config_file;
+
+#use YAML; die Dump \%config;
+my $gitcvs = GitCvs->new(%config);
+
+
+
+# Now invoke the appropriate operation
+if ($operation eq 'push') {
+
+    my %params;
+
+    if (defined $author_file) {
+        $params{author_file} = $author_file;
+    }
+
+
+    if (defined $cvsref) {
+        die "--cvsref: '$cvsref' is not a invalid commit\n" 
+            unless defined ($params{from} = valid_commit($cvsref));
+    }
+
+    if (defined $branch) {
+        die "--branch: '$branch' is not a valid branch name\n"
+            unless $branch =~ m!^([\w/-]+)$!;
+        $params{branch} = $1
+    }
+
+    if (defined $cvs_checkout_dir) {
+        $cvs_checkout_dir = $cvs_checkout_dir =~ /(.*)/;
+
+        die "--cvsworking: '$cvs_checkout_dir' is not a valid CVS checkout dir\n"
+            unless -d $cvs_checkout_dir &&
+                   -d File::Spec->catdir($cvs_checkout_dir, "CVS");
+        $params{cvs_checkout_dir} = $cvs_checkout_dir;
+    }
+
+    if (defined $commits) {
+        if ($commits eq '-') {
+            $params{commits} = [<STDIN>];
+        } else {
+            # read the commits from a file
+            die "error opening file '$commits': $!" 
+                unless open my $fh, "<", $commits;
+            $params{commits} = [<$fh>];
+            close $fh;
+        }
+
+        chomp @{ $params{commits} };
+    }
+
+
+    $gitcvs->cvs_push(%params);
+
+} elsif ($operation eq 'pull') {
+
+    my %params;
+
+    eval { $gitcvs->cvs_pull(%params) };
+    die $@ if $@;
+
+} else {
+  die "unknown command '$operation'\n$usage";
+}
+
+
+######################################################################
+
+
+# tests a string commit identifier for validity, and returns a
+# detainted version it if it is, else undef.
+sub valid_commit {
+    my $commit = shift;
+    return $1 if $commit =~ m%^([\w.^~{}:!/@-]+)$%i;
+}
+
+# set_values \%hash, $config_file
+#
+# sets the appropriate values of %hash from the values 
+# defined in $config_file
+sub set_values {
+    my $hash = shift;
+    my $config_file = shift;
+    die "No such file '$config_file'\n" 
+        unless -f $config_file;
+    die "Can't open '$config_file': $!\n" 
+        unless open my $fh, "<", $config_file;
+
+    print "reading $config_file...\n";
+
+    my %config_params;
+    eval {
+        foreach (<$fh>) {
+            next unless /^\s*[^#\s]/;
+            chomp;
+            
+            die "Malformed line in config file '$config_file'\n$_\n"
+                unless /^ \s* (\w+) \s* = \s* (.+?) \s* $/x;
+            
+            print "$1 = $2\n";
+            $config_params{$1} = $2;
+        }
+    };
+    close $fh;
+    die $@ if $@;
+
+    # set the hash elements with the following names from the
+    # corresponding options:
+    exists $config_params{$_} 
+        and $hash->{$_} = $config_params{$_}
+            foreach qw(cvsroot cvsmodule gitworking);
+}
+
+
