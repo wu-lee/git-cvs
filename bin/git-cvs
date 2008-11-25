@@ -166,11 +166,10 @@ sub cvs_checkout {
         "" : "-r '$cvstag'";
  
     my $command = <<COMMAND;
-cvs -q -d '$cvsroot' co $tagopt -d '$dir' '$cvsmodule' >/dev/null
+cvs -q -d '$cvsroot' co $tagopt -d '$dir' '$cvsmodule' >/dev/null 2>&1
 COMMAND
-    warn ">>>$command";
     system $command;
-    die "command failed ($command)" if $?
+    die "command failed ($command)" if $?;
 }
 
 
@@ -192,7 +191,7 @@ sub cvs_pull {
     # when we re-run.
     my $logfile = $self->_unique_logfile();
 
-    my @options = qw(-a -p x -v -k);
+    my @options = qw(-a -p -x -v -k);
     
 
     if ($params{author_file}) {
@@ -208,8 +207,8 @@ sub cvs_pull {
          '-d', "'$cvsroot'", 
          '-C', "'$gitworking'");
 
-    print my $command = <<COMMAND;
-git $gda cvsimport @options '$cvsmodule'  > '$logfile'
+    my $command = <<COMMAND;
+git $gda cvsimport @options '$cvsmodule'  > '$logfile' 2>&1
 COMMAND
 
 
@@ -378,8 +377,8 @@ sub cvs_push {
     foreach my $commit (@$commits) {
 
         # After committing, update the symref tracking the last commit
-        print my $command = <<COMMAND;
-git $gda cvsexportcommit @options -w '$cvs_checkout_dir' $parent_commit $commit;
+        my $command = <<COMMAND;
+git $gda cvsexportcommit @options -w '$cvs_checkout_dir' $parent_commit $commit >'$logfile' 2>&1
 COMMAND
 # git $gda symbolic-ref '$SYMREF_FOR_LAST_EXPORT' $commit; # shelved
 

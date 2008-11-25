@@ -4,7 +4,7 @@ use warnings;
 use FindBin qw($Bin);
 use File::Path qw(mkpath rmtree);
 use Shell qw(git git-cvs cvs cd);
-use Test::More tests => 11;
+use Test::More tests => 13;
 
 # This test creates a CVS repo, then git-cvs pulls it somwhere else;
 # then tests editing in both git and cvs propagate, and finally,
