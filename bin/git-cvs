@@ -5,8 +5,7 @@ use warnings;
 use Carp qw(croak);
 use File::Spec;
 use File::Path qw(mkpath);
-
-# FIXME need to allow first checkout to use an author map that isn't in .git/
+use Cwd qw(getcwd);
 
 my $SYMREF_FOR_LAST_EXPORT = 'git-cvs/CVSEXPORTCOMMITTED';
 
@@ -27,7 +26,8 @@ my $GIT_DIR = '.git';
 
 my @ATTRS = 
     qw(branch format cvsroot cvsmodule gitworking
-       gitdir config dryrun patch no_autocommit);
+       gitdir config dryrun patch no_autocommit
+       logfile);
 
 ## generate our accessors
 for my $attr (@ATTRS) {
@@ -58,8 +58,8 @@ sub new {
         'GitCvs::cvsref'         => $args{cvsref},
         'GitCvs::gitworking'     => $gitworking,
         'GitCvs::format'         => $args{format} || 'oneline',
-#        'GitCvs::remote_for_cvs' => 'cvs',        
-        'GitCvs::gitdir'           => $gitdir,
+        'GitCvs::gitdir'         => $gitdir,
+        'GitCvs::logfile'        => $args{logfile},
         'GitCvs::cvsroot'        => $args{cvsroot},
         'GitCvs::patch'          => $args{patch},
         'GitCvs::dryrun'         => !!$args{dryrun},
@@ -112,7 +112,7 @@ sub _unique_logfile {
     my $logfile;
     $index-- 
         while -e ($logfile = File::Spec->catdir($logdir, 
-                                                "$date$index.cvs-pull.log"));
+                                                "$date$index.log"));
 
     return $logfile;
 }
@@ -146,8 +146,15 @@ sub list_branches {
 }
 
 
-# checks out a CVS branch $tag from the designated repository and
-# module into the directory $dir (which should exist)
+# Checks out a CVS branch $tag from the designated repository and
+# module into the directory $dir/$cvsmodule ($dir should exist,
+# $cvsmodule will be created).  Part of the reason for checking out
+# into $dir/$cvsmodule is because cvs refuses to accept absolute paths for
+# the cvs co -d option. So we do:
+#
+#  cd $dir; cvs co -r $tag $cvsmodule
+#
+# and try not to worry about the extra dir too much.
 sub cvs_checkout {
     my $self = shift;
     my $cvstag = shift;
@@ -164,11 +171,20 @@ sub cvs_checkout {
     # seems to work.
     my $tagopt = $cvstag eq 'HEAD'?
         "" : "-r '$cvstag'";
- 
+
+    # Here we must change directory, to work around cvs's inability to
+    # accept arbitrary paths (specifically, absolute ones) in the -d
+    # option. We don't use File::chdir either, since we want only have
+    # a perl-core dependency.
     my $command = <<COMMAND;
-cvs -q -d '$cvsroot' co $tagopt -d '$dir' '$cvsmodule' >/dev/null 2>&1
+cvs -q -d '$cvsroot' co $tagopt '$cvsmodule' >/dev/null
 COMMAND
+
+    my $old_dir = getcwd;
+    chdir $dir;
     system $command;
+    chdir $old_dir;
+
     die "command failed ($command)" if $?;
 }
 
@@ -189,7 +205,8 @@ sub cvs_pull {
 
     # Find a unique filename for the log, so we don't clobber old logs
     # when we re-run.
-    my $logfile = $self->_unique_logfile();
+    my $logfile = $self->logfile($self->_unique_logfile());
+    print "logging output to $logfile\n";
 
     my @options = qw(-a -p -x -v -k);
     
@@ -207,13 +224,14 @@ sub cvs_pull {
          '-d', "'$cvsroot'", 
          '-C', "'$gitworking'");
 
+    print "Importing $cvsmodule from CVS $cvsroot\n";
     my $command = <<COMMAND;
 git $gda cvsimport @options '$cvsmodule'  > '$logfile' 2>&1
 COMMAND
 
 
     system $command 
-        and die "command failed ($command): $?"
+        and die "command failed ($command): for details see $logfile"
             unless $self->dryrun;    
 
     # Now find the CVS branches that exist
@@ -237,6 +255,7 @@ COMMAND
     
     # and create those left
     while(my ($tracker, $remote) = each %tracker_branches) {
+        print "Creating git branch $tracker to track CVS branch $remote\n";
         $command = <<COMMAND;
 git $gda branch '$tracker' '$remote' >/dev/null
 COMMAND
@@ -282,6 +301,7 @@ sub cvs_push {
     my $gda            = $self->_gitdir_arg;
     my $gitworking     = $self->gitworking;
     my $format         = $self->format;
+    my $cvsmodule      = $self->cvsmodule;
 
     croak "no git repository at $gitdir"
         unless -d $gitdir;
@@ -289,7 +309,7 @@ sub cvs_push {
     # Find a unique filename for the log, so we don't clobber old logs
     # when we re-run
     my $logfile = $self->_unique_logfile();
-
+    print "logging output to $logfile\n";
 
     my ($branch, $from, $cvs_checkout_dir, $commits) = 
         @params{'branch', 'from', 'cvs_checkout_dir', 'commits'};
@@ -311,19 +331,34 @@ sub cvs_push {
         croak "no valid cvs checkout dir '$cvs_checkout_dir'\n" 
             unless -d $cvs_checkout_dir && -d "$cvs_checkout_dir/CVS";
 
+        print "Using existing external CVS checkout in $cvs_checkout_dir\n";
+        print "(Assumed to be $cvstag branch of $cvsmodule)\n";
+        
     } else {
         croak("You are not on a cvs working branch, so either you ",
               "need to be, or you need to define the 'cvs_checkout_dir' ",
               "parameter")
             unless defined $cvstag;
 
-        $cvs_checkout_dir = File::Spec->catdir($gitdir, 'git-cvs', 
-                                               $CVS_CHECKOUT_DIR, $cvstag);
+        my $base_cvs_checkout_dir = File::Spec->catdir($gitdir, 'git-cvs', 
+                                                       $CVS_CHECKOUT_DIR, $cvstag);
+        # Make the checkout dir if necc.
+        mkpath $base_cvs_checkout_dir;
 
-        # make the checkout dir and check it out, if necc.
-        mkpath $cvs_checkout_dir;
-        $self->cvs_checkout($cvstag => $cvs_checkout_dir)
-            unless -d File::Spec->catdir($cvs_checkout_dir, 'CVS');
+        # CVS will check out into a subdir named after the module, so
+        # correct $cvs_checkout_dir for that.
+        $cvs_checkout_dir = File::Spec->catdir($base_cvs_checkout_dir, $cvsmodule);
+
+        # And check it out, if neccessary. Note that cvsexportcommit will
+        # update the dir if it exists already, so we just have to do
+        # the first checkout.
+        if (-d $cvs_checkout_dir) {
+            print "Using internal CVS checkout in $cvs_checkout_dir\n";
+        } else {
+            print "Checking out branch '$cvstag' of CVS module '$cvsmodule' to $cvs_checkout_dir\n";
+            $self->cvs_checkout($cvstag => $base_cvs_checkout_dir);
+        }
+
     }
 
     # get or deduce the commits
@@ -385,7 +420,7 @@ COMMAND
         $parent_commit = $commit;
 
         system $command 
-            and die "failed: $?\n"
+            and die "Command failed\n($command)\nFor details see $logfile\n"
                 unless $self->dryrun;
     }
 }
@@ -433,7 +468,7 @@ sub _generate_commits {
 # This doesn't quite work yet - if we do a 
 # git-reset --hard cvs/cvshead then the symbol-ref is rendered wrong
 #        @commits = 
-#           `git --no-pager --git-dir='$gitworking/.git' rev-list --reverse master...$upstream_commit`;
+#           `git --no-pager --git-dir='$gitworking/.git' rev-list --reverse master..$upstream_commit`;
 
     my $command = <<COMMAND;
 git --no-pager $gda rev-list --reverse '$from'...'$branch'
@@ -494,61 +529,28 @@ remote branch called $CVS_WORKING_BRANCH_BASE/$CVS_HEAD_TRACKING_REF.
 This command is a wrapper around git-cvsimport and
 git-cvsexportcommit, which tries to make them more convenient to use.
 
-When pulling, if --branch, --cvsref and --commits are not supplied,
-git-cvs attempts to infer the CVS branch from current branch (which
-must be 'master' for CVS HEAD, and $CVS_WORKING_BRANCH_BASE/XXX for
-any other CVS tag 'XXX').  
-
-When pushing, if --cvsworking is not supplied, it will use one in
-$GIT_DIR/git-cvs/$CVS_CHECKOUT_DIR/XXX, which will be checked out for
-you if not created.
-
-Currently, there no way to create a branch in git and have that pushed
-back into CVS - creating a branch called $CVS_WORKING_BRANCH_BASE/blah
-will not create a CVS branch of the same name. Branches have to be
-created in CVS and pulled back into git.
-
-This command will look for a config file in the current directory
-called $DEFAULT_CONFIG_FILENAME, which can define default option values, one per line
-in the format:
-
-  option=value
-
-e.g.
-
-  cvsroot=:ext:user\@server.com:/path/to/CVS
-  cvsmodule=some-module
-  cvsworking=/home/user/cvsworking/some-module
-
-This can be put in the Git working directory, and should allow the
-command to be invoked there simply as 'git-cvs push' or 'git-cvs pull'.
-
-Note, before using this command to commit your changes, you may wish
-to create a $GIT_DIR/cvs-authors file, mapping local users to those in the
-CVS repository:
-
- localuser=Some User <user\@server.com>
-
-See git-cvsexportcommit for details of this.
 
 Common options:
 
-  --gitworking <GIT DIR>   - the path to your git working directory (i.e
+  --gitworking <GIT DIR>   - The path to your git working directory (i.e
                              where $GIT_DIR is)
 
-  --dry-run                - don't do anything, just print the commands 
+  --dry-run                - Don't do anything, just print the commands 
                              which would be executed.
 
-  --config <CONFIG FILE>   - load default options from <CONFIG FILE> 
+  --config <CONFIG FILE>   - Load default options from <CONFIG FILE> 
                              instead of $DEFAULT_CONFIG_FILENAME
 
+  --logfile <FILE>         - Where to write logs.  Overrides the default, which
+                             is to write to a file: 
+                             $GIT_DIR/cvs-git/logs/<datetime><index>.log
 
 Options for pull:
 
-  --cvsroot <CVS ROOT>     - pull from this CVS repository, 
+  --cvsroot <CVS ROOT>     - Pull from this CVS repository, 
                              e.g. :ext:user\@somewhere.com:/path/to/CVS
 
-  --cvsmodule <CVS MODULE> - pull this module (default is all modules)
+  --cvsmodule <CVS MODULE> - Pull this module (default is all modules)
 
   --author-file <file>     - Pass this file to cvsimport via the -A option.
                              See cvsimport's man page for details.
@@ -557,7 +559,7 @@ Options for pull:
 
 Options for push:
 
-  --cvsworking <CVS WORKING>  - apply patches to this CVS working copy 
+  --cvsworking <CVS WORKING>  - Apply patches to this CVS working copy 
 
   --no-autocommit          - Don't autocommit (i.e. supply -f option to
                              git-cvsexportcommit, instead of -c).
@@ -590,6 +592,7 @@ GetOptions("dry-run"       => \$config{dryrun},
            "cvsworking=s"  => \$cvs_checkout_dir,
            "cvsref=s"      => \$cvsref,
            "gitworking=s"  => \$config{gitworking},
+           "logfile=s"     => \$config{logfile},
            "no-autocommit" => \$config{no_autocommit},
            "commits=s"     => \$commits,
            "config=s"      => \$config_file) 
@@ -641,7 +644,7 @@ if ($operation eq 'push') {
     }
 
     if (defined $cvs_checkout_dir) {
-        $cvs_checkout_dir = $cvs_checkout_dir =~ /(.*)/;
+        ($cvs_checkout_dir) = $cvs_checkout_dir =~ /(.*)/;
 
         die "--cvsworking: '$cvs_checkout_dir' is not a valid CVS checkout dir\n"
             unless -d $cvs_checkout_dir &&
@@ -726,3 +729,106 @@ sub set_values {
 }
 
 
+__END__
+
+=head1 NAME
+
+git-cvs - synchronise a local git repo with a remote CVS repo
+
+=head1 SYNOPSYS
+
+Typical usage:
+
+ git init
+ # create .git-cvs (see below)
+ git-cvs pull # first import
+
+ # hack hack
+ git add <blah>
+ git commit -m "added <blah>"
+ git-cvs pull # to be cautious, and see if anything changed in CVS
+ git-cvs push # push my changes to CVS
+
+ git-cvs pull # pull my changes back from CVS
+ git-cvs reset --hard cvs/cvshead # or whichever branch we're tracking
+
+
+Currently, git-cvsimport is not able to identify my commits pulled
+from CVS as the same ones pushed, and we don't try and correct for
+that.  So that last step throws away my local commits, and uses the
+duplicates pulled back from CVS instead.  Without it, I would have a
+rather loopy history.
+
+
+When used like this, --branch, --cvsref and --commits are not
+supplied, so git-cvs attempts to infer the CVS branch from current
+branch (which must be 'master' for CVS HEAD, and
+$CVS_WORKING_BRANCH_BASE/XXX for any other CVS tag 'XXX').
+
+When pushing, if --cvsworking is not supplied, it will use one in
+$GIT_DIR/git-cvs/$CVS_CHECKOUT_DIR/XXX, which will be checked out for
+you if not created.
+
+Alternatively, you can be explicit and set these arguments to whatever
+you like.
+
+=head1 DESCRIPTION
+
+This command pushes or pulls changes from a CVS repository to a Git
+repository into a remote branch called
+$CVS_WORKING_BRANCH_BASE/$CVS_HEAD_TRACKING_REF.
+
+It is a wrapper around git-cvsimport and git-cvsexportcommit which
+aims to make them more convenient to use.
+
+=head1 BRANCHING
+
+Branches in CVS are imported cortesy of git-cvsimport.  'Remote'
+branches named remote/cvs/XXX are created to track each branch, where
+XXX is the name of the branch tag.  An exception is the CVS 'HEAD'
+branch which is tracked by the git 'master' branch.
+
+However, these remote/cvs/XXX branches should not be modified -
+instead, work on the equivalent 'cvsworking/XXX' branch (or 'master'),
+which are created by this script.
+
+Note: currently, there no way to create a branch in git and have that
+pushed back into CVS - creating a branch called
+$CVS_WORKING_BRANCH_BASE/blah will not create a CVS branch of the same
+name. Branches have to be created in CVS and pulled back into git.
+
+=head1 CONFIGURATION
+
+=head2 .git-cvs
+
+This command will look for a config file in the current directory
+called $DEFAULT_CONFIG_FILENAME, which can define default option
+values, one per line in the format:
+
+  option=value
+
+e.g.
+
+  cvsroot=:ext:user\@server.com:/path/to/CVS
+  cvsmodule=some-module
+  cvsworking=/home/user/cvsworking/some-module
+
+This can be put in the Git working directory, and should allow the
+command to be invoked there simply as 'git-cvs push' or 'git-cvs pull'.
+
+=head2 AUTHOR MAPPING FILE
+
+Note, before using this command to pull the first time, you may wish
+to create a cvs-authors file, mapping local users to those in the CVS
+repository:
+
+ localuser=Some User <user\@server.com>
+
+And then pass it using --author-file option.  You only need do this
+once, then you can delete the file.  See git-cvsexportcommit's
+documentation of the -A option.
+
+=head1 AUTHOR
+
+
+=cut
