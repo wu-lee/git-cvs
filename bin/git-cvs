@@ -81,6 +81,18 @@ sub new {
 # Returns an appropriate --git-dir argment to set it to $obj->gitdir.
 sub _gitdir_arg { "--git-dir '".shift->gitdir."'" }
 
+
+sub _log {
+    my $self = shift;
+    return unless my $logfile = $self->logfile;
+    return unless open my $fh, ">>", $logfile;
+    foreach my $arg (@_) {
+        print $fh $arg;
+        print $fh "\n" unless $arg =~ /\n$/;
+    } 
+    close $fh;
+}
+
 # Returns a path to a unique, unused log-file path
 # in.git/git-cvs/logs, creating intermediate directories where
 # necessary.
@@ -165,6 +177,7 @@ sub cvs_checkout {
     
     my $cvsroot        = $self->cvsroot;
     my $cvsmodule      = $self->cvsmodule;
+    my $logfile        = $self->logfile;
 
     # Checking back into a working copy created explicitly with -r
     # HEAD seems to cause cvs/cvsimport to fail.  Doing it this way
@@ -176,16 +189,17 @@ sub cvs_checkout {
     # accept arbitrary paths (specifically, absolute ones) in the -d
     # option. We don't use File::chdir either, since we want only have
     # a perl-core dependency.
-    my $command = <<COMMAND;
-cvs -q -d '$cvsroot' co $tagopt '$cvsmodule' >/dev/null
-COMMAND
+    my $command = "cvs -q -d '$cvsroot' co $tagopt '$cvsmodule'";
+
+    $self->_log("invoking: $command");
 
     my $old_dir = getcwd;
     chdir $dir;
-    system $command;
+    system "$command >>$logfile";
     chdir $old_dir;
 
-    die "command failed ($command)" if $?;
+    die "Command failed ($command)\nFor details see $logfile" 
+        if $?;
 }
 
 
@@ -205,7 +219,8 @@ sub cvs_pull {
 
     # Find a unique filename for the log, so we don't clobber old logs
     # when we re-run.
-    my $logfile = $self->logfile($self->_unique_logfile());
+    my $logfile = $self->logfile || $self->_unique_logfile;
+    $self->logfile($logfile);
     print "logging output to $logfile\n";
 
     my @options = qw(-a -p -x -v -k);
@@ -218,26 +233,25 @@ sub cvs_pull {
         push @options,'-A', $params{author_file};
     }
     
-    push(@options, 
+    push(@options,
+         '-i', # import only, don't checkout
          '-r', "'$REMOTE_FOR_CVS'",
          '-o', "'$CVS_HEAD_TRACKING_REF'", 
          '-d', "'$cvsroot'", 
          '-C', "'$gitworking'");
 
-    print "Importing $cvsmodule from CVS $cvsroot\n";
-    my $command = <<COMMAND;
-git $gda cvsimport @options '$cvsmodule'  > '$logfile' 2>&1
-COMMAND
+    print "Importing module '$cvsmodule' from CVS $cvsroot\n";
+    my $command = "git $gda cvsimport @options '$cvsmodule'";
 
-
-    system $command 
+    $self->_log("invoking: $command");
+    system "$command >>'$logfile' 2>&1"
         and die "command failed ($command): for details see $logfile"
             unless $self->dryrun;    
 
     # Now find the CVS branches that exist
-    $command = <<COMMAND;
-git $gda show-ref
-COMMAND
+    $command = "git $gda show-ref";
+
+    $self->_log("invoking: $command");
 
     # Get the CVS tags from the refs that were created - but
     # exclude 'HEAD' and $CVS_HEAD_TRACKING_REF
@@ -256,10 +270,10 @@ COMMAND
     # and create those left
     while(my ($tracker, $remote) = each %tracker_branches) {
         print "Creating git branch $tracker to track CVS branch $remote\n";
-        $command = <<COMMAND;
-git $gda branch '$tracker' '$remote' >/dev/null
-COMMAND
-        system $command;
+        $command = "git $gda branch '$tracker' '$remote'";
+
+        $self->_log("invoking: $command");
+        system "$command >/dev/null";
         warn "Failed to create branch $tracker ($command)\n"
             if $?;
     }
@@ -302,13 +316,15 @@ sub cvs_push {
     my $gitworking     = $self->gitworking;
     my $format         = $self->format;
     my $cvsmodule      = $self->cvsmodule;
+    my $cvsroot        = $self->cvsroot;
 
     croak "no git repository at $gitdir"
         unless -d $gitdir;
 
     # Find a unique filename for the log, so we don't clobber old logs
     # when we re-run
-    my $logfile = $self->_unique_logfile();
+    my $logfile = $self->logfile || $self->_unique_logfile();
+    $self->logfile($logfile);
     print "logging output to $logfile\n";
 
     my ($branch, $from, $cvs_checkout_dir, $commits) = 
@@ -355,7 +371,8 @@ sub cvs_push {
         if (-d $cvs_checkout_dir) {
             print "Using internal CVS checkout in $cvs_checkout_dir\n";
         } else {
-            print "Checking out branch '$cvstag' of CVS module '$cvsmodule' to $cvs_checkout_dir\n";
+            print "Checking out branch '$cvstag' of CVS module '$cvsmodule'\n";
+            print " from $cvsroot to $cvs_checkout_dir\n";
             $self->cvs_checkout($cvstag => $base_cvs_checkout_dir);
         }
 
@@ -391,16 +408,20 @@ sub cvs_push {
     # Finally now we have a list of $commits, and $cvs_checkout_dir, we can get to work.
 
     # Print out the commits we're using
-    # FIXME git-log prints in date order.
-    # This can mean that commits are listed in the wrong order, but
-    # they are still applied in the correct order.  It is confusing
-    # when this happens, however.
-    print "Pending commits:\n";
-    system "git $gda --no-pager log --no-walk '--pretty=$format' @$commits";
+    print "Pending commits for CVS branch '$cvstag' of module '$cvsmodule'\n";
+    print "  at $cvsroot:\n";
+
+    # git-log prints in date order.  This can sometimes mean that
+    # commits are listed in the wrong order, so to avoid confusing the
+    # hell out of the user, we re-order them
+    my %commit_names = map { chomp; split ' ', $_, 2 }
+        `git $gda --no-pager log --no-walk --pretty=oneline @$commits`;
+    print "$_ $commit_names{$_}\n"
+        foreach @$commits;
     print "\n";
 
 
-    my @options = qw(-p -v -u);
+    my @options = (qw(-p -v -u -w), "'$cvs_checkout_dir'");
 
     # If we don't autocommit, we may need to force merges to updated
     # files
@@ -409,19 +430,27 @@ sub cvs_push {
 
     # Export each commit
     my $parent_commit = ''; # we need this in case we commit a merge
-    foreach my $commit (@$commits) {
+
+    # Don't actually do anything if we're dry-running
+    return if $self->dryrun;
+    
+    foreach my $commit (@$commits) {        
+        print "$commit... ";
+
+        my $command = "git $gda cvsexportcommit @options  $parent_commit $commit";
 
         # After committing, update the symref tracking the last commit
-        my $command = <<COMMAND;
-git $gda cvsexportcommit @options -w '$cvs_checkout_dir' $parent_commit $commit >'$logfile' 2>&1
-COMMAND
-# git $gda symbolic-ref '$SYMREF_FOR_LAST_EXPORT' $commit; # shelved
-
+        # git $gda symbolic-ref '$SYMREF_FOR_LAST_EXPORT' $commit; # shelved
+        
+        $self->_log("invoking: $command\n");
+        if (system "$command >>'$logfile' 2>&1") { 
+            print "failed\n";
+            die "Command failed\n($command)\nFor details see $logfile";
+        } 
+          
+        # If we get here, things are ok
         $parent_commit = $commit;
-
-        system $command 
-            and die "Command failed\n($command)\nFor details see $logfile\n"
-                unless $self->dryrun;
+        print "ok\n";
     }
 }
 
@@ -470,11 +499,9 @@ sub _generate_commits {
 #        @commits = 
 #           `git --no-pager --git-dir='$gitworking/.git' rev-list --reverse master..$upstream_commit`;
 
-    my $command = <<COMMAND;
-git --no-pager $gda rev-list --reverse '$from'...'$branch'
-COMMAND
-    ;
+    my $command = "git --no-pager $gda rev-list --reverse '$from'...'$branch'";
     
+    $self->_log("invoking: $command");
     my @commits = `$command`;
     die "command failed ($command)"
         if $?;
@@ -714,7 +741,7 @@ sub set_values {
             die "Malformed line in config file '$config_file'\n$_\n"
                 unless /^ \s* (\w+) \s* = \s* (.+?) \s* $/x;
             
-            print "$1 = $2\n";
+#            print "$1 = $2\n";
             $config_params{$1} = $2;
         }
     };
