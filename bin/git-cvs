@@ -234,7 +234,7 @@ sub cvs_pull {
     }
     
     push(@options,
-         '-i', # import only, don't checkout
+#         '-i', # import only, don't checkout
          '-r', "'$REMOTE_FOR_CVS'",
          '-o', "'$CVS_HEAD_TRACKING_REF'", 
          '-d', "'$cvsroot'", 
@@ -243,10 +243,36 @@ sub cvs_pull {
     print "Importing module '$cvsmodule' from CVS $cvsroot\n";
     my $command = "git $gda cvsimport @options '$cvsmodule'";
 
+    my $head0 = `git $gda rev-parse --verify HEAD`;
+
     $self->_log("invoking: $command");
     system "$command >>'$logfile' 2>&1"
         and die "command failed ($command): for details see $logfile"
             unless $self->dryrun;    
+
+=pod
+
+    # do a git-read-tree here on HEAD?
+    my $head = `git $gda rev-parse --verify HEAD`;
+    my $branch = $self->current_branch || '';
+    if ($head0 ne $head) {
+        chomp foreach $head, $head0;
+     
+        $command = "git $gda read-tree -m -u $branch $head";
+        system $command
+            and die "command failed ($command)"
+                unless $self->dryrun;
+
+    } else {
+        
+        $command = "git $gda merge cvsimport HEAD"; #"git $gda read-tree -m -u $branch $head";
+        system $command
+            and die "command failed ($command)"
+                unless $self->dryrun;
+
+    }
+
+=cut
 
     # Now find the CVS branches that exist
     $command = "git $gda show-ref";
@@ -499,7 +525,7 @@ sub _generate_commits {
 #        @commits = 
 #           `git --no-pager --git-dir='$gitworking/.git' rev-list --reverse master..$upstream_commit`;
 
-    my $command = "git --no-pager $gda rev-list --reverse '$from'...'$branch'";
+    my $command = "git --no-pager $gda rev-list --first-parent --reverse '$from'...'$branch'";
     
     $self->_log("invoking: $command");
     my @commits = `$command`;
