@@ -16,7 +16,24 @@ sub new {
     die "No such dir $path\n"
         unless -d $path;
 
-    return bless { path  => $path }, $class;
+    # 'exe_map' should be a hash mapping exectuable names to explicit
+    # paths to use.  It is optional, if no mapping is given for an
+    # executable, the bare name is used and it is resoved via $PATH
+    my $exe_map = {};
+    if (exists $param{exe_map}) {
+        $exe_map = $param{exe_map};
+        die "exe_map parameter must be a hashref"
+            unless ref $exe_map eq 'HASH';
+
+        # Check any explicit paths actually exist.
+        foreach my $exe_name (keys %$exe_map) {
+            my $exe_path = $exe_map->{$exe_name};
+            die "No executable exists at '$exe_path'"
+                unless -x $exe_path;
+        }
+    }
+
+    return bless { path  => $path, exe_map => $exe_map }, $class;
 }
 
 
@@ -155,6 +172,8 @@ use Cwd;
 use File::Path qw(mkpath);
 use base 'MyTest::Replay';
 
+sub default_executable { 'cvs' }
+
 
 sub new {
     my $class = shift;
@@ -190,10 +209,12 @@ sub invoke {
     die "Invalid command '$name'"
         unless $name eq 'cvs';
 
+
+    my $exe = $self->{exe_map}{cvs} || 'cvs';
     my $dir = getcwd;
     chdir $self->{path} 
         or die "Failed to chdir to $self->{path}";
-    system 'cvs', '-d', $self->{cvsroot}, @command;
+    system $exe, '-d', $self->{cvsroot}, @command;
     chdir $dir;
 
     warn "command failed: cvs @command"
@@ -228,14 +249,16 @@ sub invoke {
 
     my $name = shift @command;
     
-     die "Invalid command '$name'"
-         unless ($name) = ($name =~ /^(git|git-cvs)$/);
+    die "Invalid command '$name'"
+        unless ($name) = ($name =~ /^(git|git-cvs)$/);
+    
+    my $exe = $self->{exe_map}{$name} || $name;
 
     my $dir = getcwd;
     chdir $self->{path} 
         or die "Couldn't chdir to $self->{path}";
     
-    system $name, @command;
+    system $exe, @command;
 
     chdir $dir;
 

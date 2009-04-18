@@ -3,19 +3,13 @@ use strict;
 use warnings;
 use FindBin qw($Bin);
 use lib "$Bin/lib";
-use MyTest qw(barf git_cvs);
 use MyTest::Dirs;
 use MyTest::Replay;
 
-use File::Path qw(mkpath rmtree);
-use Shell qw(git cvs cd);
-use Test::More tests => 16;
+use Test::More tests => 20;
 
 # This tests basic usage
 
-
-$ENV{PATH} = "$Bin/../bin:$ENV{PATH}";
-$Shell::raw = 1;
 
 # Define some directories
 my %D = MyTest::Dirs->hash(
@@ -40,8 +34,11 @@ $cvs->playback(<<ACTIONS);
 *cvs ci -m "added one and two"
 ACTIONS
 
-# Create a git repo
-my $git = MyTest::Replay::Git->new(path => $D{git_repo});
+# Create a git repo, which explicitly uses our dist's git cvs
+my $git = MyTest::Replay::Git->new(path => $D{git_repo},
+                                   exe_map => {
+                                       'git-cvs' => "$Bin/../bin/git-cvs",
+                                   });
 
 
 $git->playback(<<ACTIONS);
@@ -136,15 +133,38 @@ $cvs->playback(<<ACTIONS);
 ACTIONS
 
 
+# Do changes in CVS head get checked out in Git master, even when
+# we're on another branch?
+
+$cvs->playback(<<ACTIONS);
+## CVS is on BRANCH1, return to head, and check cvs_branch1 file has gone
+*cvs up -d -A
+!cvs_branch1
+
+## Delete the file 'four' in HEAD and commit
+*cvs remove -f four
+*cvs ci -m "deleted 'four'"
+!four
+ACTIONS
+
+
+$git->playback(<<ACTIONS);
+## git is already on cvsworking/branch1, so we can just pull
+*git-cvs pull
+*git reset --hard cvs/BRANCH1
+# Is 'four' deleted?  It shouldn't be in this branch.
+?four
+# Switch back to master branch...
+*git checkout master
+*git reset --hard cvs/cvshead
+# ...It should be deleted in this branch
+!four
+ACTIONS
+
+
 
 # This test aims to test the problem I experienced where a 
 # file added in one branch block it being added in another.
-
-$git->playback(<<ACTIONS);
-## Pull last changes back into git
-*git-cvs pull
-*git reset --hard cvs/BRANCH1
-ACTIONS
 
 
 $cvs->playback(<<ACTIONS);
@@ -157,7 +177,7 @@ ACTIONS
 
 $git->playback(<<ACTIONS);
 ## Now add another with the same name in BRANCH1
-#*git checkout BRANCH1
+*git checkout cvsworking/BRANCH1
 +cvs_nasty
 *git add cvs_nasty
 *git commit -m "added cvs_nasty in Git BRANCH1"
