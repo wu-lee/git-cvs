@@ -9,7 +9,7 @@ use MyTest::Replay;
 
 use File::Path qw(mkpath rmtree);
 use Shell qw(git cvs cd);
-use Test::More tests => 14;
+use Test::More tests => 16;
 
 # This tests basic usage
 

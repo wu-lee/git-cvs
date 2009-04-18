@@ -243,7 +243,7 @@ sub cvs_pull {
     print "Importing module '$cvsmodule' from CVS $cvsroot\n";
     my $command = "git $gda cvsimport @options '$cvsmodule'";
 
-    my $head0 = `git $gda rev-parse --verify HEAD`;
+#    my $head0 = `git $gda rev-parse --verify HEAD`;
 
     $self->_log("invoking: $command");
     system "$command >>'$logfile' 2>&1"
