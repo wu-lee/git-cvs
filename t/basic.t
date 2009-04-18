@@ -17,6 +17,7 @@ use Test::More tests => 16;
 $ENV{PATH} = "$Bin/../bin:$ENV{PATH}";
 $Shell::raw = 1;
 
+# Define some directories
 my %D = MyTest::Dirs->hash(
     data => [],
     temp => [cvs_repo => 'cvs',
@@ -26,31 +27,32 @@ my %D = MyTest::Dirs->hash(
 
 my $cvs_module = 'module1';
 
-# create a cvs repo and working dir
+# Create a cvs repo and working dir
 my $cvs = MyTest::Replay::CVS->new(path => $D{cvs_work},
                                    module => $cvs_module,
                                    cvsroot => $D{cvs_repo});
 
 $cvs->playback(<<ACTIONS);
-# check in a couple of files
+## Check in a couple of files
 +one
 +two 
 *cvs add one two
 *cvs ci -m "added one and two"
 ACTIONS
 
-# create a git repo
+# Create a git repo
 my $git = MyTest::Replay::Git->new(path => $D{git_repo});
 
+
 $git->playback(<<ACTIONS);
-# init .git-cvs and make the first import from CVS
+## Init .git-cvs and make the first import from CVS
 +.git-cvs cvsroot=$D{cvs_repo}
 +.git-cvs cvsmodule=$cvs_module
 *git-cvs pull
 ?one
 ?two
 
-# now add a file in git
+## Now add a file in git
 +three
 *git add three
 *git commit -m "added three" 
@@ -60,18 +62,18 @@ $git->playback(<<ACTIONS);
 ACTIONS
 
 $cvs->playback(<<ACTIONS);
-# pull that back to CVS
+## Pull that back to CVS
 *cvs up -d
 ?three
 
-# add a new file in CVS
+## Add a new file in CVS
 +four
 *cvs add four
 *cvs ci -m "added four"
 ACTIONS
 
 $git->playback(<<ACTIONS);
-# pull back a second time from CVS
+## Pull back a second time from CVS
 *git-cvs pull
 *git reset --hard cvs/cvshead
 ?one
@@ -81,14 +83,14 @@ $git->playback(<<ACTIONS);
 ACTIONS
 
 $cvs->playback(<<ACTIONS);
-# branch in CVS
+## Branch in CVS
 *cvs tag -b BRANCH1
 *cvs update -r BRANCH1
 *cvs tag BRANCH1_BASE
 *cvs tag BRANCH1_LAST_MERGE
 *cvs ci -m "created BRANCH1"
 
-# create a file to identify that branch
+## Create a file to identify that branch
 +cvs_branch1
 *cvs add cvs_branch1
 *cvs ci -m "added file cvs_branch1"
@@ -98,37 +100,37 @@ ACTIONS
 # can we see the branches?
 
 $git->playback(<<ACTIONS);
-# pull the changes back to git
+## Pull the changes back to git
 *git-cvs pull
 
-# can we see the remote branches?
+## Can we see the remote branches?
 ?.git/refs/remotes/cvs/cvshead
 ?.git/refs/remotes/cvs/HEAD
 ?.git/refs/remotes/cvs/BRANCH1
 
-# and the tracking branch?
+## And the tracking branch?
 ?.git/refs/heads/cvsworking/BRANCH1
 
-# but is the branch1 absent?
+## But is the branch1 absent?
 !cvs_branch1
 
-# now switch to BRANCH1 
+## Now switch to BRANCH1 
 *git checkout cvsworking/BRANCH1
 *git reset --hard cvs/BRANCH1
 ?cvs_branch1
 
-# and modify it
+## And modify it
 +git/branch1 hello
 *git add git/branch1
 *git commit -m "added git/branch1"
 
-# push it back
+## Push it back
 *git-cvs push
 ACTIONS
 
 
 $cvs->playback(<<ACTIONS);
-# check the changes appear in CVS
+## Check the changes appear in CVS
 *cvs up -d
 ?git/branch1?
 ACTIONS
@@ -139,14 +141,14 @@ ACTIONS
 # file added in one branch block it being added in another.
 
 $git->playback(<<ACTIONS);
-# pull last changes back into git
+## Pull last changes back into git
 *git-cvs pull
 *git reset --hard cvs/BRANCH1
 ACTIONS
 
 
 $cvs->playback(<<ACTIONS);
-# add a file in HEAD
+## Add a file in HEAD
 *cvs up -d -A
 +cvs_nasty
 *cvs add cvs_nasty
@@ -154,7 +156,7 @@ $cvs->playback(<<ACTIONS);
 ACTIONS
 
 $git->playback(<<ACTIONS);
-# now add another with the same name in BRANCH1
+## Now add another with the same name in BRANCH1
 #*git checkout BRANCH1
 +cvs_nasty
 *git add cvs_nasty
@@ -194,13 +196,13 @@ ACTIONS
 
 
 $git->playback(<<ACTIONS);
-# and push to cvs
+## And push to cvs
 *git-cvs push
 
-# pull the changes back to git
+## Pull the changes back to git
 *git-cvs pull
 
-# is it ok?
+## Is it ok?
 ?cvs_nasty
 *git checkout cvsworking/BRANCH1
 ?cvs_nasty
