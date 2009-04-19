@@ -52,7 +52,13 @@ sub new {
 #
 # Invokations have the form "*<command> <args>" and perform some action,
 # such as a cvs command.
-
+#
+# Tests for existance or non-existance of some path (relative to the
+# repository root) have the form "?<path>" and "!<path>" respectively.
+#
+# Blank lines, and comments - lines beginning with a hash '#'
+# character (with optional preceeding whitespace) - are ignored.
+#
 my $path_re = qr{[\w.~/,+-]+};
 
 sub playback {
