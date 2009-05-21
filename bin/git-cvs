@@ -237,7 +237,8 @@ sub cvs_pull {
          '-r', "'$REMOTE_FOR_CVS'",
          '-o', "'$CVS_HEAD_TRACKING_REF'", 
          '-d', "'$cvsroot'", 
-         '-C', "'$gitworking'");
+         '-C', "'$gitworking'"); 
+    # Note to self: if cvsps cache causes problems, use -p to ignore it
 
     print "Importing module '$cvsmodule' from CVS $cvsroot\n";
     my $command = "git $gda cvsimport @options '$cvsmodule'";
