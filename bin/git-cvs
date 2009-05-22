@@ -597,7 +597,12 @@ Options for push:
                              before comitting.
 
   --commits <FILENAME>     - Push only the commits listed in FILENAME  
-                             (which can be - to read from standard input)
+                             (which can be - to read from standard input). 
+
+                             Note, these are applied in the order
+                             given, so should be oldest-first (git
+                             rev-list and log both supply the commits
+                             newest-first by default).
 
   --cvsref                 - The local CVS-tracking ref we are committing 
                              relative to (defaults to $CVS_HEAD_TRACKING_REF).
