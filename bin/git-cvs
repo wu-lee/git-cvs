@@ -40,6 +40,18 @@ for my $attr (@ATTRS) {
 }
 
 
+# $detainted_commit_id = $class->valid_commit($commit_id);
+# Tests a string commit identifier for validity, and returns a
+# detainted version it if it is, else undef.
+sub valid_commit {
+    shift;
+    my $commit = shift;
+    return $1 if $commit =~ m%^([\w.^~{}:!/@-]+)$%i;
+}
+
+
+
+
 sub new {
     my $class = shift;
     my %args = @_;
@@ -386,7 +398,7 @@ sub cvs_push {
             unless ref $commits eq 'ARRAY';
 
         # detaint commits
-        my @invalids = grep !($_ = valid_commit($_)), @$commits;
+        my @invalids = grep !($_ = $self->valid_commit($_)), @$commits;
 
         croak "these commits are invalid: @invalids"
             if @invalids;
@@ -666,7 +678,7 @@ if ($operation eq 'push') {
 
     if (defined $cvsref) {
         die "--cvsref: '$cvsref' is not a invalid commit\n" 
-            unless defined ($params{from} = valid_commit($cvsref));
+            unless defined ($params{from} = GitCvs->valid_commit($cvsref));
     }
 
     if (defined $branch) {
@@ -715,13 +727,6 @@ if ($operation eq 'push') {
 
 ######################################################################
 
-
-# tests a string commit identifier for validity, and returns a
-# detainted version it if it is, else undef.
-sub valid_commit {
-    my $commit = shift;
-    return $1 if $commit =~ m%^([\w.^~{}:!/@-]+)$%i;
-}
 
 # set_values \%hash, $config_file
 #
