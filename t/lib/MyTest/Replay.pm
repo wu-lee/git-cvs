@@ -2,6 +2,7 @@ package MyTest::Replay;
 use strict;
 use warnings;
 use Test::Builder;
+use File::Path qw(rmtree);
 
 our $Test = Test::Builder->new;
 
