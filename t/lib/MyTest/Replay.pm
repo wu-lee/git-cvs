@@ -134,7 +134,8 @@ sub remove {
     my ($vol, $reldir, $file) = File::Spec->splitpath(shift);
     my $dir = $self->expand($reldir);
 
-    rmtree $dir;    
+    my $path = File::Spec->catpath($vol, $dir, $file);
+    rmtree $path;  
 }
 
 
