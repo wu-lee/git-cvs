@@ -1,0 +1,108 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use FindBin qw($Bin);
+
+# This is a wrapper for git, for testing convenience, allowing us to
+# use our own implementation of git-* commands when
+# necessary. (Specifically, it allows us to experiment with patched
+# versions of, for example, git-cvsexportcommit).
+# 
+# To use it, set the PATH variable (or your system's equivalent) to
+# find this wrapper ahead of the real git.  Any git commands defined
+# in the same directory will be invoked in preference to the installed
+# original, otherwise the original will be invoked as normal.
+
+
+# $item = first \&predicate, @list
+# $item = first { ... } @list
+#
+# Returns the first element of @list for whom the &predicate function
+# returns a true value. (See also List::Util).
+sub first(&@) {
+    my $predicate = shift;
+    for (@_) {
+        return $_ if $predicate->();
+    }
+}
+
+# Filter out any leading options, and get the git subcommand specified (if
+# any).  This needs to be a bit careful to distinguish paramters to
+# options from subcommands.
+my %param_count = ('--exec-path' => 1,
+                   '--git-dir' => 1, 
+                   '--work-tree' => 1);
+my ($subcommand, @options);
+my $skip_counter = 0;
+while(my $arg = shift @ARGV) {
+    
+    # Skip option parameters
+    next if $skip_counter-- > 0;
+
+    # This must be the subcommand if there is no '-'
+    $subcommand = $arg and last
+        if $arg !~ /^-/;
+
+    # We've got an option - slurp it and set $skip_counter to skip its
+    # parameters (assumed there are none if not otherwise specified).
+    $skip_counter = $param_count{$arg} || 0
+        unless $arg =~ /=/;
+}
+continue {
+    push @options, $arg;
+}
+
+
+# Find the first git executable in the path which isn't this file.
+my $git = 
+    first { -x } 
+    map "$_/git", 
+    grep $_ ne $Bin, 
+    split /:/, $ENV{PATH};
+
+die "No git command could be found on the path"
+    unless $git;
+
+
+if (defined $subcommand) {
+    # A subcommand was given.
+
+    # If a locally defined version exists, use it.
+    my $target = "$Bin/git-$subcommand";
+    if (-f $target) {
+
+        warn "Invoking $target @ARGV\n"; # DEBUG
+        
+        # Set $PATH to include our local executable path before the
+        # standard $GIT_EXEC_PATH (somewhat like git does before
+        # executing subcommands).
+        chomp (my $GIT_EXEC_PATH = `$git --exec-path`);
+        $ENV{PATH} = join ':', grep $_, $Bin, $GIT_EXEC_PATH, $ENV{PATH}; 
+
+        # Pass control to the executable.  Note, we don't pass in the
+        # @options for git, as the subcommand probably won't
+        # understand.
+        exec $target, @ARGV; 
+    }
+
+    # Else put $subcommand back into @ARGV, so that it appears as the
+    # first non-option argument to git later
+    unshift @ARGV, $subcommand;
+}
+
+# Try to invoke git normally...
+
+# Now, the subcommand may invoke git subcommands directly, i.e like
+# "git-foo" rather than "git foo", so if we want these to use our
+# local definitions we need to make sure the path is set up to find
+# our local definitions first - as git will prepend $GIT_EXEC_PATH to
+# $PATH.  Unfortunately I don't know a simple way to do this, without
+# rewriting git itself.  So we don't bother.
+
+warn "Invoking $git @options @ARGV\n"; # DEBUG
+
+# pass control to the git executable
+exec $git, @options, @ARGV; 
+
+
+    
