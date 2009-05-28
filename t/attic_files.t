@@ -80,6 +80,7 @@ ACTIONS
 
 # Check this file 'two' appears ok in CVS
 $cvs->playback(<<ACTIONS);
+*cvs update -d
 ?two
 ACTIONS
 
