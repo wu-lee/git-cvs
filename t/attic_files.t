@@ -6,7 +6,7 @@ use lib "$Bin/lib";
 use MyTest::Dirs;
 use MyTest::Replay;
 
-use Test::More tests => 20;
+use Test::More tests => 7;
 
 # This tests cases where files are deleted and exist in the CVS
 # "Attic", which can be reported in a peculiar way by CVS (in
@@ -49,6 +49,8 @@ $cvs->playback(<<ACTIONS);
 +two 
 *cvs add one two
 *cvs ci -m "added one and two"
+?one
+?two 
 
 ## Then delete one
 -two
