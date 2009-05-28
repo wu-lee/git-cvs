@@ -65,6 +65,10 @@ my $path_re = qr{[\w.~/,+-]+};
 sub playback {
     my $self = shift;
     my @actions = split "\n", shift;
+
+    # make sure errors are reported at the right level
+    local $Test::Builder::Level = $Test::Builder::Level + 1;
+
     for (@actions) {
         
         s/^\s+//s;
@@ -153,6 +157,9 @@ sub assert_path {
     my $dir = (File::Spec->splitdir($self->{path}))[-1];
     my (undef, undef, $file) = File::Spec->splitpath($path);
 
+    # make sure errors are reported at the right level
+    local $Test::Builder::Level = $Test::Builder::Level + 1;
+
     if ($file) {
         $self->assert(-f $path, "file '$relpath' exists in $dir/");
     } else {
@@ -165,6 +172,9 @@ sub assert_no_path {
     my $path = File::Spec->catdir($self->{path}, $relpath);
     my $dir = (File::Spec->splitdir($self->{path}))[-1];
     my (undef, undef, $file) = File::Spec->splitpath($path);
+
+    # make sure errors are reported at the right level
+    local $Test::Builder::Level = $Test::Builder::Level + 1;
 
     if ($file) {
         $self->assert(!-f $path, "no file '$relpath' exists in $dir/");
