@@ -671,11 +671,6 @@ if ($operation eq 'push') {
 
     my %params;
 
-    if (defined $author_file) {
-        $params{author_file} = $author_file;
-    }
-
-
     if (defined $cvsref) {
         die "--cvsref: '$cvsref' is not a invalid commit\n" 
             unless defined ($params{from} = GitCvs->valid_commit($cvsref));
@@ -716,6 +711,10 @@ if ($operation eq 'push') {
 } elsif ($operation eq 'pull') {
 
     my %params;
+
+    if (defined $author_file) {
+        $params{author_file} = $author_file;
+    }
 
     eval { $gitcvs->cvs_pull(%params) };
     die $@ if $@;
@@ -861,8 +860,8 @@ repository:
 
  localuser=Some User <user\@server.com>
 
-And then pass it using --author-file option.  You only need do this
-once, then you can delete the file.  See git-cvsexportcommit's
+And then use the --author-file option for git-cvs pull.  You only need
+do this once, then you can delete the file.  See git-cvsexportcommit's
 documentation of the -A option.
 
 =head1 AUTHOR
