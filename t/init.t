@@ -3,7 +3,7 @@ use strict;
 use warnings;
 use FindBin qw($Bin);
 use File::Path qw(mkpath rmtree);
-use Shell qw(git git-cvs cvs cd);
+use Shell qw(git cvs cd);
 use Test::More tests => 13;
 
 # This test creates a CVS repo, then git-cvs pulls it somwhere else;
@@ -18,7 +18,8 @@ use Test::More tests => 13;
 # TODO:
 # test --author-file
 
-$ENV{PATH} = "$Bin/../bin:$ENV{PATH}";
+# removed, since this creates a loop now that bin/git wrapper exists
+#$ENV{PATH} = "$Bin/../bin:$ENV{PATH}"; 
 $Shell::raw = 1;
 
 sub barf {
@@ -30,7 +31,7 @@ sub barf {
 }
 
 sub git_cvs {
-    die "can't run git-cvs: $!" unless open my $fh, '|-', "git-cvs", @_;
+    die "can't run git-cvs: $!" unless open my $fh, '|-', "$Bin/../bin/git-cvs", @_;
     my $out = join "", <$fh>;
     close $fh;
     return $out;
