@@ -1,0 +1,83 @@
+The git-cvs source code respository can be found here:
+
+ http://github.com/wu-lee/git-cvs/
+
+
+There's no installer, but the script is self-contained and just needs to be on
+the execution $PATH (as well as git and cvs).
+
+Given a CVS repository at $CVS_ROOT, tracking a module $CVS_MODULE can be done
+like this:
+
+ # Create a git repo
+ mkdir repo_name
+ cd repo_name
+
+ # (Note, there should be no .git directory here already, as this will
+ # stop git cvsimport working correctly with the -o option)
+
+ # Initialise git-cvs's config file
+ echo cvsroot=$CVS_ROOT      >.git-cvs
+ echo cvsmodule=$CVS_MODULE >>.git-cvs
+
+ # Optionally create an authormap for git-cvsimport, e.g.:
+ #  echo "$CVSUSER=$GIT_AUTHOR_NAME <$GIT_AUTHOR_EMAIL>" > $cvs_authors
+ #
+ # ... and supply the option --author-file $cvs_authors on the first
+ # git-cvs pull.
+ #
+ # git-cvsimport will then copy $cvs_authors into .git/cvs-authors,
+ # and use it on subsequent invocations; the original $cvs_authors
+ # file can be deleted.
+ #
+ # See the documentation for git-cvsimport's -A option for more information.
+
+ # Pull gets cvs files using git-cvsimport. (cvsimport will initialise .git
+ # and copy any $cvs_authors file specified into it)
+ git-cvs pull  # or: git-cvs pull --author-file $cvs_authors
+
+
+
+ # hack hack...
+
+ # Push the files back into CVS with git-cvsexportcommit
+ # (This pushes the commits master..remotes/cvs/cvshead by default,
+ # or cvsworking/NAME..remotes/cvs/NAME for each CVS branch NAME)
+ git-cvs push
+
+ # Pull the changes back into remote/cvs/cvshead and
+ # (a messy part I've not found a way round yet) throw away our
+ # locally merged commits
+ git-cvs pull
+ git reset --hard master
+
+ # More hacking...
+
+ # Repeat push/pull steps as needed
+
+
+Some other points:
+
+ - Changes in CVS get pulled back, including multiple branches.
+
+ - An author-mapping file can be supplied as for cvs-import -A
+
+ - The script creates local CVS working directories
+   .git/git-cvs/cvscheckout/NAME, one for each CVS branch NAME.
+
+ - Git's master branch tracks CVS's HEAD branch.
+
+ - A git branch cvsworking/NAME is created to track each CVS branch NAME.
+
+ - Edits in these branches get pushed back to the appropriate CVS branches.
+
+ - Verbose subcommand output currently goes into .git/git-cvs/logs.
+
+ - Invoking git-cvs with no parameters gets information about the options.
+
+ - In an emergency, a list of commit ids can be supplied to git-cvs push.
+
+ - Written in Perl, uses only core modules (tested with v5.8.8)
+
+ - There is a small test suite in t/, run individually or with "prove/*.t"
+
