@@ -229,6 +229,21 @@ sub cvs_pull {
 
     mkpath $gitworking;
 
+	# If .git exists, git-cvsimport will expect there to be a branch
+	# with the name given by the -o flag, and will die if there isn't
+	# one, with a cryptic error message.  We try to make this more user
+	# friendly by checking for this condition and giving a more helpful
+	# error.
+	if (-d "$gitworking/.git") {
+
+		my $tracking_ref = "$REMOTE_FOR_CVS/$CVS_HEAD_TRACKING_REF";
+		my @tracking_ref_info = `git $gda show-ref $tracking_ref`;
+
+		@tracking_ref_info 
+			or croak "A .git directory exists but there is no tracking ref '$tracking_ref'";
+	}
+
+
     # Find a unique filename for the log, so we don't clobber old logs
     # when we re-run.
     my $logfile = $self->logfile || $self->_unique_logfile;
@@ -717,6 +732,20 @@ if ($operation eq 'push') {
     }
 
     eval { $gitcvs->cvs_pull(%params) };
+
+	# Perl's exceptions leave something to be desired.  Expand certain
+	# terse croaks from the $gitcvs object into fuller ones without
+	# line-number info.
+	if ($@ =~ /no tracking ref '(.*?)'/i) {
+		die <<ERROR;
+Error: a .git directory exists already, but it hasn't a CVS import ref called
+'$1'. If this is your first import from CVS, you need to remove this
+pre-existing .git repository and try again. You should not run 'git
+init' before your first import. If it is not your first import,
+something is wrong, because $1 should already exist.
+ERROR
+	}
+	# other errors assumed internal, leave them as they are.
     die $@ if $@;
 
 } else {
