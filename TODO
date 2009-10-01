@@ -1,0 +1,7 @@
+add test for --author-file
+
+work around or fix cvsimport's problem that makes --author-file so
+fiddly, i.e. it's dumb check for .git to decide whether the -o branch
+should exist or be created.
+
+Perhaps at least warn the user if .git exists when --author-file is used?
