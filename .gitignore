@@ -1,2 +1,4 @@
 *~
-t/temp
+*#
+/t/temp
+/tmp
