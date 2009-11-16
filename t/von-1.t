@@ -49,6 +49,9 @@ $git->playback(<<ACTIONS);
 *git-cvs pull
 ?one
 ?two
+
+## set the default log format (this is the earliest we can do that)
+*git config format.pretty %h=%s%d%n
 ACTIONS
 
 $git->playback(<<ACTIONS);
@@ -56,14 +59,24 @@ $git->playback(<<ACTIONS);
 +alpha
 *git add alpha
 *git commit -m "added alpha" 
+*git log --graph  --all
+
+#? *git-cvs pull
+## *git log --graph  --all
 
 *git-cvs push
+*git log --graph --all
+
+#? *git-cvs pull 
+#? *git reset --hard cvs/cvshead
+## *git log --graph --all
 ACTIONS
 
 $git->playback(<<ACTIONS);
 +beta
 *git add beta
 *git commit -m "added beta" 
+*git log --graph --all
 
 *git-cvs push
 ACTIONS
