@@ -3,6 +3,7 @@ use strict;
 use warnings;
 use Test::Builder;
 use File::Path qw(rmtree);
+use Cwd ();
 
 our $Test = Test::Builder->new;
 
@@ -183,10 +184,25 @@ sub assert_no_path {
     }    
 }
 
+
+sub unchecked_invoke {
+    my $self = shift;
+    
+    my $dir = Cwd::getcwd;
+    chdir $self->{path} 
+        or die "Couldn't chdir to $self->{path}";
+    
+    system @_;
+
+    chdir $dir;
+
+    warn "command failed: @_"
+        if $?;
+}
+
 package MyTest::Replay::CVS;
 use strict;
 use warnings;
-use Cwd;
 use File::Path qw(mkpath);
 use base 'MyTest::Replay';
 
@@ -229,14 +245,8 @@ sub invoke {
 
 
     my $exe = $self->{exe_map}{cvs} || 'cvs';
-    my $dir = getcwd;
-    chdir $self->{path} 
-        or die "Failed to chdir to $self->{path}";
-    system $exe, '-d', $self->{cvsroot}, @command;
-    chdir $dir;
 
-    warn "command failed: cvs @command"
-        if $?;
+    $self->unchecked_invoke($exe, '-d', $self->{cvsroot}, @command);
 }
 
 package MyTest::Replay::Git;
@@ -268,20 +278,13 @@ sub invoke {
     my $name = shift @command;
     
     die "Invalid command '$name'"
-        unless ($name) = ($name =~ /^(git|git-cvs)$/);
+        unless $name =~ /^(git|git-cvs)$/;
+    $name = $1;
     
     my $exe = $self->{exe_map}{$name} || $name;
 
-    my $dir = getcwd;
-    chdir $self->{path} 
-        or die "Couldn't chdir to $self->{path}";
-    
-    system $exe, @command;
-
-    chdir $dir;
-
-    warn "command failed: $name @command"
-        if $?;
+    $self->unchecked_invoke($exe, @command);
 }
+
 
 1;
