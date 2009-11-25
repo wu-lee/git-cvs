@@ -49,7 +49,7 @@ like this:
  # (a messy part I've not found a way round yet) throw away our
  # locally merged commits
  git-cvs pull
- git reset --hard master
+ git reset --hard remote/cvs/cvshead
 
  # More hacking...
 
